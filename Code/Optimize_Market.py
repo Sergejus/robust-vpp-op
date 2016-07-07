@@ -60,6 +60,7 @@ class Optimize_Market:
         self._load_generator_data()
         self._load_intial_data(wind_scenarios, load_signal)
         self.data.mybuses = ['n5']
+        self.data.myscenarios = ['s0']
 
     def _load_network(self):
         self.data.nodedf = pd.read_csv(defaults.nodefile, index_col=0)
@@ -91,6 +92,7 @@ class Optimize_Market:
         self.data.scenarios = wind_scenarios.items.tolist()
         self.data.taus = wind_scenarios.major_axis.tolist()
         self.data.mytaus = self.data.taus[1:1+4]
+        self.data.batttaus = self.data.taus[0:0+5]
         self.data.wind_scenarios = wind_scenarios
         self.data.load = load_signal
         self.data.scenarioprob = {s: 1.0/len(self.data.scenarios) for s in self.data.scenarios}
@@ -98,6 +100,8 @@ class Optimize_Market:
         self.data.daprice = {t: p for t, p in zip(self.data.mytaus, [30,35,40,33])}
         self.data.bupprice = {t: p for t, p in zip(self.data.mytaus, [35,50,45,48])}
         self.data.bdownprice = {t: p for t, p in zip(self.data.mytaus, [10,30,15,23])}
+        
+        self.data.bprices = {t: p for t, p in zip(self.data.mytaus, [[35,10],[50,30],[45,15],[48,23]])}
 
     ###
     #   Model Building
@@ -111,7 +115,9 @@ class Optimize_Market:
 
     def _build_variables(self):
         mytaus = self.data.mytaus
-        scenarios = self.data.scenarios
+        batttaus = self.data.batttaus
+#        scenarios = self.data.scenarios
+        scenarios = self.data.myscenarios
         nodes = self.data.nodeorder
         wind = self.data.wind_scenarios
 
@@ -130,12 +136,43 @@ class Optimize_Market:
                 ebalance[s, t] = m.addVar(lb=-100.0, ub=100.0)
         self.variables.ebalance = ebalance
         
-        # Beta at time t
-        beta = {}
+        beta_beta = {}
         for t in mytaus:
             for s in scenarios:
-                beta[s, t] = m.addVar(lb=-5000.0, ub=5000.0)
-        self.variables.beta = beta
+                beta_beta[s, t] = m.addVar(lb=-5000.0, ub=5000.0)
+        self.variables.beta_beta = beta_beta
+                
+        
+        # Beta at time t
+        beta = {}
+        time_steps = 4
+        Vert_idx = ['v{0}'.format(v+1) for v in range(int(2**time_steps))]
+        for v in Vert_idx:
+            for t in mytaus:
+                for s in scenarios:
+                    beta[s, t, v] = m.addVar(lb=-5000.0, ub=5000.0)
+            self.variables.beta = beta
+            
+            
+        
+        pin = {}
+        for t in batttaus:
+            for s in scenarios:
+                pin[s, t] = m.addVar(lb=0.0, ub=20.0)
+        self.variables.pin = pin
+        
+        pout = {}
+        for t in batttaus:
+            for s in scenarios:
+                pout[s, t] = m.addVar(lb=0.0, ub=20.0)
+        self.variables.pout = pout
+
+        blevel = {}
+        for t in batttaus:
+            for s in scenarios:
+                blevel[s, t] = m.addVar(lb=0.0, ub=60.0)
+        self.variables.blevel = blevel
+
 
         m.update()
 
@@ -144,61 +181,127 @@ class Optimize_Market:
     def _build_objective(self):
         mytaus = self.data.mytaus
         nodes = self.data.nodeorder
-        scenarios = self.data.scenarios
-#        generators = self.data.generators
-#        gendata = self.data.generatorinfo.T.to_dict()
-
+#        scenarios = self.data.scenarios
+        scenarios = self.data.myscenarios
+        
+        time_steps = 4
+        Vert_idx = ['v{0}'.format(v+1) for v in range(int(2**time_steps))]        
+        
         m = self.model
         
         m.setObjective(
             gb.quicksum(
             self.data.scenarioprob[s]*(
             self.variables.eday[t]*self.data.daprice[t] +
-            self.variables.beta[s, t]) for s in scenarios[0:1] for t in mytaus
+            self.variables.beta_beta[s, t]) for s in scenarios for t in mytaus
             ),
             gb.GRB.MAXIMIZE)
             
     def _build_constraints(self):
         mytaus = self.data.mytaus
-        scenarios = self.data.scenarios
+        batttaus = self.data.batttaus
+#        scenarios = self.data.scenarios
+        scenarios = self.data.myscenarios
         mybuses = self.data.mybuses
-#        generators = self.data.generators
-#        gendata = self.data.generatorinfo.T.to_dict()
         nodes = self.data.nodeorder
         edges = self.data.lineorder
         wind = self.data.wind_scenarios
-#        load = self.data.load.to_dict()
 
         m = self.model
-        eday, ebalance, beta = self.variables.eday, self.variables.ebalance, self.variables.beta
+        eday, ebalance, beta, pin, pout, blevel, beta_beta = self.variables.eday, self.variables.ebalance, self.variables.beta, self.variables.pin, self.variables.pout, self.variables.blevel, self.variables.beta_beta
 
         # Added wind balance constraint
         windpower_balance = {}
         for t in mytaus:
-            for s in scenarios[0:1]:
+            for s in scenarios:
                 windpower_balance[s, t] = m.addConstr(
                     gb.quicksum(wind[s, t, b] for b in mybuses)
                     - eday[t],
                     gb.GRB.EQUAL,
-                    ebalance[s, t])
+                    ebalance[s, t] - pout[s, t] + pin[s, t])
         self.constraints.windpower_balance = windpower_balance
         
-        # Added beta constraints upper price range
-        beta_upper = {}
-        for t in mytaus:
-            for s in scenarios:
-                beta_upper[s, t] = m.addConstr(
-                    beta[s, t],
-                    gb.GRB.LESS_EQUAL,
-                    ebalance[s, t] * self.data.bupprice[t])
-        self.constraints.beta_upper = beta_upper
+#        # Added beta constraints upper price range
+#        beta_upper = {}
+#        for t in mytaus:
+#            for s in scenarios:
+#                beta_upper[s, t] = m.addConstr(
+#                    beta[s, t],
+#                    gb.GRB.LESS_EQUAL,
+#                    ebalance[s, t] * self.data.bupprice[t])
+#        self.constraints.beta_upper = beta_upper
+#        
+#        # Added beta constraints lower price range
+#        beta_lower = {}
+#        for t in mytaus:
+#            for s in scenarios:
+#                beta_lower[s, t] = m.addConstr(
+#                    beta[s, t],
+#                    gb.GRB.LESS_EQUAL,
+#                    beta_new[])
+#        self.constraints.beta_lower = beta_lower
+                
+        time_steps = 4
+        Time_idx = ['t{0}'.format(t+1) for t in range(time_steps)]
+        Vert_idx = ['v{0}'.format(v+1) for v in range(int(2**time_steps))]
+         
+        lambda_d_list=[30,35,40,33]
+        lambda_d = {Time_idx[t]:lambda_d_list[t] for t in range(time_steps)}
+         
+        psi_up = [5,15,5,15]
+        psi_dw = [-20,-5,-25,-10]
+         
+        df=pd.DataFrame({Time_idx[t]:([psi_up[t]]*int(8/2**t)+[psi_dw[t]]*int(8/2**t))*int(2**t) for t in range(time_steps)},index=Vert_idx)
+        lambda_b={}
+        for t in Time_idx:
+            for v in Vert_idx:
+                lambda_b[t,v] = df.ix[v,t]+lambda_d[t]
+                
+        beta_new = {}
+        for v in Vert_idx:
+            for t in mytaus:
+                for s in scenarios:
+                    beta_new[s, t, v] = m.addConstr(
+                        beta[s, t, v],
+                        gb.GRB.LESS_EQUAL,
+                        ebalance[s, t] * lambda_b[t, v])
+            self.constraints.beta_new = beta_new  
         
-        # Added beta constraints lower price range
-        beta_lower = {}
+        beta_beta_new = {}
+        for v in Vert_idx:
+            for t in mytaus:
+                for s in scenarios:
+                    beta_beta_new[s, t, v] = m.addConstr(
+                        beta_beta[s, t],
+                        gb.GRB.LESS_EQUAL,
+                        beta[s, t, v])
+        self.constraints.beta_beta_new = beta_beta_new      
+        
+        # Battery level constraint
+        batt_level = {}
+        eff = 0.9
         for t in mytaus:
             for s in scenarios:
-                beta_lower[s, t] = m.addConstr(
-                    beta[s, t],
-                    gb.GRB.LESS_EQUAL,
-                    ebalance[s, t] * self.data.bdownprice[t])
-        self.constraints.beta_lower = beta_lower
+                batt_level[s, t] = m.addConstr(
+                    blevel[s, t],
+                    gb.GRB.EQUAL,
+                    blevel[s, batttaus[mytaus.index(t)]] + eff*pin[s,t] - (1/eff)*pout[s,t])
+        self.constraints.batt_level = batt_level
+        
+        
+        batt_level_init = {}
+        for s in scenarios:
+            batt_level_init[s, t] = m.addConstr(
+                blevel[s, 't0'],
+                gb.GRB.EQUAL,
+                30.0)
+            self.constraints.batt_level_init = batt_level_init
+        
+        batt_level_final = {}
+        for s in scenarios:
+            batt_level_final[s] = m.addConstr(
+                blevel[s, 't4'],
+                gb.GRB.EQUAL,
+                30.0)
+        self.constraints.batt_level_final = batt_level_final
+        
