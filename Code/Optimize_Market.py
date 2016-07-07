@@ -154,7 +154,7 @@ class Optimize_Market:
             gb.quicksum(
             self.data.scenarioprob[s]*(
             self.variables.eday[t]*self.data.daprice[t] +
-            self.variables.beta[s, t]) for s in scenarios[0:1] for t in mytaus
+            self.variables.beta[s, t]) for s in scenarios for t in mytaus
             ),
             gb.GRB.MAXIMIZE)
             
@@ -175,7 +175,7 @@ class Optimize_Market:
         # Added wind balance constraint
         windpower_balance = {}
         for t in mytaus:
-            for s in scenarios[0:1]:
+            for s in scenarios:
                 windpower_balance[s, t] = m.addConstr(
                     gb.quicksum(wind[s, t, b] for b in mybuses)
                     - eday[t],
